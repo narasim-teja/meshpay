@@ -71,7 +71,7 @@ Current implementation:
   - Relayer keeps 0.1%
 
 Smart contract:
-- Contract: `CACKTHTCAZW5EK5YCVEVLBIEN536TTBLMUQIJKLOICBDVBKANECMVZZC`
+- Contract: `CACKTHTCAZW5EK5YCVEVLBIEN536TTBLMUQIJKLOICBDVBKANECMVZZC` (https://stellar.expert/explorer/testnet/contract/CACKTHTCAZW5EK5YCVEVLBIEN536TTBLMUQIJKLOICBDVBKANECMVZZC)
 - Native XLM SAC: `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`
 - Method: `record_and_distribute_rewards(sender, recipient, broadcaster, relayer, gross_amount, token_address)`
 - App scaffolding exists (`SorobanHelper`) and can be switched on when Soroban RPC simulate/sign/send 
