@@ -119,3 +119,8 @@ If you would like to test the product send us your email so we can send you a te
 ## Project Summary Video
 
 https://drive.google.com/file/d/1aE-XOFBTOnBlINOAudVSS0zLiArPbsbK/view?usp=sharing
+
+## UI Pics
+<img width="585" height="1266" alt="IMG_0764" src="https://github.com/user-attachments/assets/b8cd0570-a8ad-49ba-ba3c-6d3a411c3e83" />
+<img width="585" height="1266" alt="IMG_0762" src="https://github.com/user-attachments/assets/5dc531f5-6d24-43fd-b321-68e0594a4746" />
+<img width="585" height="1266" alt="IMG_0763" src="https://github.com/user-attachments/assets/a6daaebf-8e03-4a55-8992-fdec0d977a0a" />
