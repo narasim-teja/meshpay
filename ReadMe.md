@@ -112,6 +112,6 @@ Permissions to allow on first run: Bluetooth, Local Network, Camera (for QR scan
   - Path summary (Wi‑Fi/Cellular)
  
 ## Demo
-
+https://drive.google.com/file/d/1a6iFqncbkXofjnWoCiOD4tLn1dypIbBV/view?usp=sharing
 
 ## Project Summary
