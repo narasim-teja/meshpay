@@ -111,37 +111,18 @@ enum MeshMessage {
 
 ---
 
-### Phase 4: Offline Payment Flow (Days 5-6) 🔄 IN PROGRESS
+### Phase 4: Offline Payment Flow (Days 5-6) ✅ COMPLETE
 **Goal:** Complete end-to-end offline payment experience
 
-**Next Steps:**
-1. **Detect sender's online/offline status** (use existing `hasInternet` from MeshNetworkManager)
-2. **Modify SendPaymentView to support offline mode:**
-   - If sender is offline: Create signed transaction and broadcast via mesh
-   - If sender is online: Send normally via Stellar network
-3. **Create transaction payload for mesh broadcast:**
-   - Signed transaction XDR (base64 encoded)
-   - Recipient address
-   - Amount
-   - Sender's public key
-4. **Implement relay logic on online peers:**
-   - Listen for `paymentRequest` messages
-   - Submit transaction to Stellar Horizon
-   - Broadcast confirmation back through mesh
-5. **Queue system for offline transactions:**
-   - Store pending transactions locally
-   - Auto-retry when connection available
-   - Show status in UI (pending/submitted/confirmed)
-
-**Core Features TO DO:**
-- [ ] Detect online/offline status in SendPaymentView
-- [ ] Create signed transaction when offline
-- [ ] Broadcast transaction via mesh to find internet connection
-- [ ] Implement relay node logic (online devices submit for offline ones)
-- [ ] Queue transactions locally with Core Data
-- [ ] Auto-sync when back online
-- [ ] Show pending/confirmed states in UI
-- [ ] Handle edge cases (no peers, all peers offline, etc.)
+**Core Features:**
+- ✅ Detect online/offline status in SendPaymentView
+- ✅ Create signed transaction when offline
+- ✅ Broadcast transaction via mesh to find internet connection
+- ✅ Implement relay node logic (online devices submit for offline ones)
+- ✅ Queue transactions locally with Core Data
+- ✅ Auto-sync when back online
+- ✅ Show pending/confirmed states in UI
+- ✅ Handle edge cases (no peers, all peers offline, etc.)
 
 **User Flow:**
 1. Alice (offline) sends 100 XLM to Bob
@@ -152,35 +133,25 @@ enum MeshMessage {
 6. Bob's app auto-detects incoming payment
 7. Alice sees confirmation when back online
 
-**Testing:** Full offline payment between 2 devices (1 offline, 1 relay, 1 recipient)
+**Testing:** ✅ Full offline payment between 2 devices (1 offline, 1 relay, 1 recipient)
 
 ---
 
-### Phase 2: Smart Contract Escrow (Days 7) 📋 PLANNED
-**Goal:** Deploy escrow contract and integrate with app
+### Phase 2: Rewards Smart Contract (Days 7) 🔄 IN PROGRESS
+**Goal:** Deploy Rewards contract with fee distribution system
 
-**Status:** DEFERRED - Will implement after basic offline payments work
+**Fee Structure:**
+- Total fee: 1% of payment amount
+- Broadcaster (offline sender's first peer): 0.5%
+- Relayer (online peer who submits): 0.1%
+- Protocol (contract deployer): 0.4%
 
 **Core Features:**
-- Write Rust escrow contract (Soroban)
-- Deploy to Stellar testnet
-- Create escrow when sending offline
-- Claim escrow when receiving
-- Auto-refund after 24 hours
-
-**Contract Functions:**
-```rust
-// Lock sender's funds in escrow
-create_escrow(recipient: Address, amount: i128) -> u64
-
-// Recipient claims the escrowed funds
-claim_escrow(escrow_id: u64)
-
-// Sender gets refund if unclaimed after 24h
-refund_escrow(escrow_id: u64)
-```
-
-**Testing:** Create escrow → Claim → Verify funds moved
+- [ ] Write Soroban rewards contract with fee distribution
+- [ ] Deploy to Stellar testnet
+- [ ] Integration with iOS app
+- [ ] Track broadcaster and relayer addresses
+- [ ] Automatic fee distribution on payment
 
 ---
 
