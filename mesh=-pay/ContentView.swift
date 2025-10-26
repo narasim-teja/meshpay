@@ -8,14 +8,18 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var walletManager = WalletManager()
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        NavigationView {
+            if walletManager.isWalletCreated {
+                WalletView()
+                    .environmentObject(walletManager)
+            } else {
+                WalletSetupView()
+                    .environmentObject(walletManager)
+            }
         }
-        .padding()
     }
 }
 
