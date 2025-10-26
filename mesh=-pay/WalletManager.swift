@@ -336,8 +336,14 @@ class WalletManager: ObservableObject {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = "tx=\(xdr)".data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Properly percent-encode the XDR for application/x-www-form-urlencoded
+        // Encode '+', '/', '=' and any non-alphanumerics so Horizon receives exact base64
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+        let encodedXdr = xdr.addingPercentEncoding(withAllowedCharacters: allowed) ?? xdr
+        request.httpBody = "tx=\(encodedXdr)".data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -367,9 +373,30 @@ class WalletManager: ObservableObject {
                 await fetchBalance()
                 return hash
             }
+            // Got 200 but no hash in response – treat as failure and surface body for debugging
+            if let body = String(data: data, encoding: .utf8) {
+                print("❌ Horizon 200 without hash: \(body)")
+            }
+            throw WalletError.submissionFailed
+        } else {
+            // Try to surface Horizon error details for easier debugging
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let title = (json["title"] as? String) ?? "Submission failed"
+                let status = (json["status"] as? Int) ?? httpResponse.statusCode
+                let detail = (json["detail"] as? String) ?? ""
+                let extras = (json["extras"] as? [String: Any]) ?? [:]
+                let resultCodes = (extras["result_codes"] as? [String: Any]) ?? [:]
+                let txCode = (resultCodes["transaction"] as? String) ?? "unknown"
+                let echoedEnvelope = (extras["envelope_xdr"] as? String) ?? ""
+                print("❌ Horizon error: status=\(status) title=\(title) code=\(txCode) detail=\(detail)")
+                if !echoedEnvelope.isEmpty {
+                    print("❌ Envelope echoed by Horizon (truncated): \(echoedEnvelope.prefix(80))...")
+                }
+            } else if let body = String(data: data, encoding: .utf8) {
+                print("❌ Horizon error raw: \(body)")
+            }
+            throw WalletError.submissionFailed
         }
-
-        throw WalletError.submissionFailed
     }
 
 

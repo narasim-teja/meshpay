@@ -73,6 +73,11 @@ struct MeshNetworkView: View {
                             color: .orange
                         )
                     }
+
+                    // Show current path summary (Wi‑Fi/Cellular/etc.)
+                    Text(meshManager.networkPathSummary)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Spacer()
@@ -206,6 +211,12 @@ struct MeshNetworkView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(spacing: 12) {
+                // Offline Mode toggle for demos (skips internet pings)
+                Toggle(isOn: $meshManager.offlineMode) {
+                    Label("Offline Mode (skip internet checks)", systemImage: "airplane")
+                }
+                .toggleStyle(SwitchToggleStyle(tint: .orange))
+
                 Button(action: {
                     meshManager.broadcastMessage(.ping)
                     showTestMessage = true
@@ -224,6 +235,38 @@ struct MeshNetworkView: View {
                     .cornerRadius(12)
                 }
                 .disabled(meshManager.connectedPeers.isEmpty)
+
+                // Restart only discovery (advertising + browsing)
+                Button(action: {
+                    meshManager.restartDiscoveryNow()
+                }) {
+                    HStack {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                        Text("Restart Discovery")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.purple)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+
+                Button(action: {
+                    meshManager.stopMesh()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        meshManager.startMesh()
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Restart Mesh Network")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.orange)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
 
                 if showTestMessage {
                     Text("Ping sent! ✓")

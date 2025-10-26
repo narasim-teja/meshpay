@@ -1,6 +1,7 @@
 import Foundation
 import MultipeerConnectivity
 import Combine
+import Network
 
 // MARK: - Mesh Message Types
 enum MeshMessage: Codable {
@@ -85,10 +86,18 @@ class MeshNetworkManager: NSObject, ObservableObject {
     @Published var isBrowsing = false
     @Published var receivedMessages: [String] = []
     @Published var hasInternet = true
+    @Published var offlineMode = false // When true, skip active internet checks for demos
+    @Published var networkPathSummary: String = "Unknown"
 
     private var walletPublicKey: String = ""
     private var invitedPeers = Set<String>() // Track peers we've already invited
     private var discoveredPeers = Set<MCPeerID>() // Track all discovered peers for reconnection
+    private var lastInvitationTime: [String: Date] = [:] // Cooldown for invitations
+
+    // Network path monitoring
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "mesh.path.monitor")
+    private var discoveryRestartWorkItem: DispatchWorkItem?
 
     // Relay functionality - reference to wallet manager for submitting transactions
     weak var walletManager: WalletManager?
@@ -134,6 +143,9 @@ class MeshNetworkManager: NSObject, ObservableObject {
 
         // Start monitoring internet connectivity
         startMonitoringConnectivity()
+
+        // Start monitoring interface/path changes (Wi‑Fi/Bluetooth/Cellular)
+        startMonitoringNetworkPath()
     }
 
     // MARK: - Start/Stop Mesh Network
@@ -150,18 +162,19 @@ class MeshNetworkManager: NSObject, ObservableObject {
         print("🌐 Mesh network started - Advertising and Browsing")
 
         // Start periodic connection cleanup (less frequent to reduce overhead)
-        Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupStaleConnections()
             }
         }
 
-        // Restart browsing/advertising periodically to handle WiFi state changes
-        Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.restartDiscovery()
-            }
-        }
+        // Only restart discovery occasionally (less disruptive)
+        // Disabled for now as it causes disconnections
+        // Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+        //     Task { @MainActor in
+        //         self?.restartDiscovery()
+        //     }
+        // }
     }
 
     private func restartDiscovery() {
@@ -177,6 +190,20 @@ class MeshNetworkManager: NSObject, ObservableObject {
             self.browser.startBrowsingForPeers()
             print("🔄 Discovery restarted")
         }
+    }
+
+    // Public helper so UI can manually trigger a refresh
+    func restartDiscoveryNow() {
+        restartDiscovery()
+    }
+
+    private func scheduleDebouncedDiscoveryRestart() {
+        discoveryRestartWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.restartDiscovery()
+        }
+        discoveryRestartWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 
     private func cleanupStaleConnections() {
@@ -249,6 +276,14 @@ class MeshNetworkManager: NSObject, ObservableObject {
     }
 
     private func checkInternetConnectivity() {
+        // Honor Offline Mode (useful for demos to avoid HEAD pings/log spam)
+        if offlineMode {
+            // Derive availability from NWPath status only
+            // hasInternet is updated by path monitor; just broadcast if needed
+            broadcastStatusIfChanged()
+            return
+        }
+
         // Simple check - try to reach a known endpoint
         guard let url = URL(string: "https://www.apple.com") else { return }
         var request = URLRequest(url: url)
@@ -259,32 +294,55 @@ class MeshNetworkManager: NSObject, ObservableObject {
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             Task { @MainActor in
                 guard let self = self else { return }
-                // Consider connection available if we got any response (even non-200)
-                // or if we're on cellular/wifi
-                let hasConnection: Bool
-                if let httpResponse = response as? HTTPURLResponse {
-                    hasConnection = httpResponse.statusCode == 200 || httpResponse.statusCode == 301 || httpResponse.statusCode == 302
-                } else {
-                    // Fallback: assume online (since we can't definitively say we're offline)
-                    hasConnection = true
-                }
+                // Consider connection available if we got a normal HTTP response
+                let httpOk = (response as? HTTPURLResponse)?.statusCode
+                let hasConnection = httpOk == 200 || httpOk == 301 || httpOk == 302
                 self.hasInternet = hasConnection
 
-                // Only broadcast if status changed significantly
-                let batteryLevel = self.getBatteryLevel()
-                let batteryChanged = abs(batteryLevel - self.lastBroadcastedBattery) > 0.1 // 10% change
-                let internetChanged = hasConnection != self.lastBroadcastedInternetStatus
-
-                if internetChanged || batteryChanged {
-                    self.lastBroadcastedInternetStatus = hasConnection
-                    self.lastBroadcastedBattery = batteryLevel
-
-                    let message = MeshMessage.peerInfo(hasInternet: hasConnection, batteryLevel: batteryLevel)
-                    self.broadcastMessage(message)
-                    print("📡 Broadcasting status: internet=\(hasConnection), battery=\(Int(batteryLevel*100))%")
-                }
+                self.broadcastStatusIfChanged()
             }
         }.resume()
+    }
+
+    private func broadcastStatusIfChanged() {
+        // Only broadcast if status changed significantly
+        let batteryLevel = getBatteryLevel()
+        let batteryChanged = abs(batteryLevel - lastBroadcastedBattery) > 0.1 // 10% change
+        let internetChanged = hasInternet != lastBroadcastedInternetStatus
+
+        if internetChanged || batteryChanged {
+            lastBroadcastedInternetStatus = hasInternet
+            lastBroadcastedBattery = batteryLevel
+
+            let message = MeshMessage.peerInfo(hasInternet: hasInternet, batteryLevel: batteryLevel)
+            broadcastMessage(message)
+            print("📡 Broadcasting status: internet=\(hasInternet), battery=\(Int(batteryLevel*100))%")
+        }
+    }
+
+    private func startMonitoringNetworkPath() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            Task { @MainActor in
+                let satisfied = path.status == .satisfied
+                self.hasInternet = satisfied
+
+                var components: [String] = []
+                if path.usesInterfaceType(.wifi) { components.append("Wi‑Fi") }
+                if path.usesInterfaceType(.cellular) { components.append("Cellular") }
+                if path.usesInterfaceType(.wiredEthernet) { components.append("Ethernet") }
+                if path.usesInterfaceType(.other) { components.append("Other") }
+                let transports = components.isEmpty ? "None" : components.joined(separator: ", ")
+                self.networkPathSummary = satisfied ? "Online via: \(transports)" : "Offline (no route)"
+
+                // Restart discovery when path changes to re‑negotiate transport (Bluetooth/AWDL/Wi‑Fi)
+                self.scheduleDebouncedDiscoveryRestart()
+
+                // Inform peers if status changed
+                self.broadcastStatusIfChanged()
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
     }
 
     // MARK: - Helper Methods
@@ -346,22 +404,11 @@ extension MeshNetworkManager: MCSessionDelegate {
                 // Allow re-invitation after disconnect
                 invitedPeers.remove(peerID.displayName)
 
-                // Attempt to reconnect after a delay
-                if discoveredPeers.contains(peerID) {
-                    print("🔄 Will attempt to reconnect to \(peerID.displayName)")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        guard let self = self else { return }
-                        let stillDiscovered = self.discoveredPeers.contains(peerID)
-                        let notConnected = !self.session.connectedPeers.contains(peerID)
-                        let notInvited = !self.invitedPeers.contains(peerID.displayName)
-
-                        if stillDiscovered && notConnected && notInvited {
-                            print("🔄 Reconnecting to \(peerID.displayName)")
-                            self.invitedPeers.insert(peerID.displayName)
-                            self.browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
-                        }
-                    }
-                }
+                // Disabled automatic reconnection - causing connection storms
+                // Let natural discovery handle reconnections
+                // if discoveredPeers.contains(peerID) {
+                //     print("🔄 Will attempt to reconnect to \(peerID.displayName) in 5 seconds")
+                // }
 
             @unknown default:
                 print("⚠️ Unknown peer state")
@@ -527,7 +574,6 @@ extension MeshNetworkManager: MCNearbyServiceAdvertiserDelegate {
 // MARK: - MCNearbyServiceBrowserDelegate
 extension MeshNetworkManager: MCNearbyServiceBrowserDelegate {
     nonisolated func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
-        print("🔍 Found peer: \(peerID.displayName)")
         // Auto-invite found peers if not already connected/invited
         Task { @MainActor in
             // Track discovered peer
@@ -537,9 +583,15 @@ extension MeshNetworkManager: MCNearbyServiceBrowserDelegate {
             let isConnecting = self.connectedPeers.contains { $0.peerID == peerID && $0.state == .connecting }
             let alreadyInvited = self.invitedPeers.contains(peerID.displayName)
 
-            if !isAlreadyConnected && !isConnecting && !alreadyInvited {
+            // Check invitation cooldown - wait at least 10 seconds between invitations
+            let lastInvite = self.lastInvitationTime[peerID.displayName]
+            let cooldownExpired = lastInvite == nil || Date().timeIntervalSince(lastInvite!) > 10.0
+
+            if !isAlreadyConnected && !isConnecting && !alreadyInvited && cooldownExpired {
+                print("🔍 Found peer: \(peerID.displayName) - sending invitation")
                 self.invitedPeers.insert(peerID.displayName)
-                browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
+                self.lastInvitationTime[peerID.displayName] = Date()
+                browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 20)
             }
         }
     }
