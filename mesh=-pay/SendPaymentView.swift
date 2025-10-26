@@ -65,9 +65,40 @@ struct SendPaymentView: View {
                     }
 
                     if let amountValue = Double(amount), amountValue > 0 {
-                        Text("Available: \(walletManager.balance) XLM")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        let fees = RewardsContract.calculateFees(amount: amountValue)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Available:")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(walletManager.balance) XLM")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            HStack {
+                                Text("Network fee (1%):")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(String(format: "%.4f", fees.broadcaster + fees.relayer + fees.protocol)) XLM")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+
+                            HStack {
+                                Text("Recipient gets:")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text("\(String(format: "%.4f", fees.net)) XLM")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.green)
+                            }
+                        }
                     }
                 }
 
@@ -154,11 +185,13 @@ struct SendPaymentView: View {
             let signedTxXDR = try await walletManager.createSignedTransaction(to: recipient, amount: amount)
             print("✅ Transaction signed: \(signedTxXDR.prefix(50))...")
 
-            // Broadcast via mesh network
+            // Broadcast via mesh network with sender info (broadcaster will be set by first relay peer)
             let paymentRequest = MeshMessage.paymentRequest(
                 recipient: recipient,
                 amount: String(amount),
-                escrowTx: signedTxXDR
+                escrowTx: signedTxXDR,
+                sender: walletManager.publicKey,
+                broadcaster: nil  // Will be filled by first peer who relays
             )
 
             await MainActor.run {

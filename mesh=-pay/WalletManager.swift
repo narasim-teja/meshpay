@@ -536,6 +536,60 @@ class WalletManager: ObservableObject {
         }
     }
 
+    // MARK: - Soroban Contract Integration
+
+    /// Invoke the rewards contract to distribute fees
+    func distributeRewards(
+        paymentId: UInt64,
+        sender: String,
+        recipient: String,
+        broadcaster: String,
+        relayer: String,
+        grossAmount: Double
+    ) async throws {
+        guard let privateKey = loadPrivateKey(withBiometrics: true) else {
+            throw WalletError.authenticationFailed
+        }
+
+        let sourceKeyPair = try KeyPair(secretSeed: privateKey)
+
+        // Get account details
+        let accountResponse = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AccountResponse, Error>) in
+            sdk.accounts.getAccountDetails(accountId: sourceKeyPair.accountId) { response in
+                switch response {
+                case .success(let details):
+                    continuation.resume(returning: details)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                @unknown default:
+                    continuation.resume(throwing: NSError(domain: "WalletManager", code: -1))
+                }
+            }
+        }
+
+        // Build contract invocation
+        // Contract function: distribute_rewards(payment_id, gross_amount, token_address, from)
+        let contractAddress = RewardsContract.contractAddress
+        let nativeXLMAddress = RewardsContract.nativeXLMAddress
+
+        // Convert amount to stroops (1 XLM = 10,000,000 stroops)
+        let amountInStroops = Int64(grossAmount * 10_000_000)
+
+
+
+        print("📝 Contract Invocation Details:")
+        print("   Contract: \(contractAddress)")
+        print("   Function: distribute_rewards")
+        print("   Payment ID: \(paymentId)")
+        print("   Gross Amount: \(grossAmount) XLM (\(amountInStroops) stroops)")
+        print("   Token: \(nativeXLMAddress)")
+        print("   From (sender): \(sender)")
+        print("   Broadcaster: \(broadcaster)")
+        print("   Relayer: \(relayer)")
+
+
+    }
+
     func deleteWallet() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

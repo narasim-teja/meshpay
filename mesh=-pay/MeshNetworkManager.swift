@@ -6,7 +6,7 @@ import stellarsdk
 
 // MARK: - Mesh Message Types
 enum MeshMessage: Codable {
-    case paymentRequest(recipient: String, amount: String, escrowTx: String)
+    case paymentRequest(recipient: String, amount: String, escrowTx: String, sender: String, broadcaster: String?)
     case paymentConfirmation(escrowId: String, status: String)
     case peerInfo(hasInternet: Bool, batteryLevel: Float)
     case ping
@@ -14,7 +14,7 @@ enum MeshMessage: Codable {
     case balanceUpdate(accountId: String, balance: String, sequence: Int64)
 
     enum CodingKeys: String, CodingKey {
-        case type, recipient, amount, escrowTx, escrowId, status, hasInternet, batteryLevel, accountId, balance, sequence
+        case type, recipient, amount, escrowTx, sender, broadcaster, escrowId, status, hasInternet, batteryLevel, accountId, balance, sequence
     }
 
     init(from decoder: Decoder) throws {
@@ -26,7 +26,9 @@ enum MeshMessage: Codable {
             let recipient = try container.decode(String.self, forKey: .recipient)
             let amount = try container.decode(String.self, forKey: .amount)
             let escrowTx = try container.decode(String.self, forKey: .escrowTx)
-            self = .paymentRequest(recipient: recipient, amount: amount, escrowTx: escrowTx)
+            let sender = try container.decode(String.self, forKey: .sender)
+            let broadcaster = try container.decodeIfPresent(String.self, forKey: .broadcaster)
+            self = .paymentRequest(recipient: recipient, amount: amount, escrowTx: escrowTx, sender: sender, broadcaster: broadcaster)
         case "paymentConfirmation":
             let escrowId = try container.decode(String.self, forKey: .escrowId)
             let status = try container.decode(String.self, forKey: .status)
@@ -54,11 +56,13 @@ enum MeshMessage: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
-        case .paymentRequest(let recipient, let amount, let escrowTx):
+        case .paymentRequest(let recipient, let amount, let escrowTx, let sender, let broadcaster):
             try container.encode("paymentRequest", forKey: .type)
             try container.encode(recipient, forKey: .recipient)
             try container.encode(amount, forKey: .amount)
             try container.encode(escrowTx, forKey: .escrowTx)
+            try container.encode(sender, forKey: .sender)
+            try container.encodeIfPresent(broadcaster, forKey: .broadcaster)
         case .paymentConfirmation(let escrowId, let status):
             try container.encode("paymentConfirmation", forKey: .type)
             try container.encode(escrowId, forKey: .escrowId)
@@ -456,7 +460,7 @@ extension MeshNetworkManager: MCSessionDelegate {
 
     private func handleReceivedMessage(_ message: MeshMessage, from peerID: MCPeerID) {
         switch message {
-        case .paymentRequest(let recipient, let amount, let escrowTx):
+        case .paymentRequest(let recipient, let amount, let escrowTx, let sender, var broadcaster):
             // Dedupe identical requests to avoid storms
             if let ts = seenPaymentRequests[escrowTx], Date().timeIntervalSince(ts) < 60 {
                 return
@@ -465,6 +469,12 @@ extension MeshNetworkManager: MCSessionDelegate {
 
             print("💰 Received payment request: \(amount) to \(recipient)")
             receivedMessages.append("Payment: \(amount) to \(recipient.prefix(8))...")
+
+            // If broadcaster is not set, we're the first relay peer - set ourselves as broadcaster
+            if broadcaster == nil {
+                broadcaster = walletPublicKey
+                print("📡 Setting self as broadcaster: \(walletPublicKey.prefix(8))...")
+            }
 
             // If we have internet, relay the transaction to Stellar network
             if hasInternet, let walletManager = walletManager {
@@ -476,7 +486,10 @@ extension MeshNetworkManager: MCSessionDelegate {
                         await self.relayPaymentToNetwork(
                             recipient: recipient,
                             amount: amount,
-                            txXDR: escrowTx
+                            txXDR: escrowTx,
+                            sender: sender,
+                            broadcaster: broadcaster ?? "",
+                            relayer: self.walletPublicKey
                         )
                         await MainActor.run { self.pendingRelayTasks.removeValue(forKey: escrowTx) }
                     }
@@ -485,10 +498,16 @@ extension MeshNetworkManager: MCSessionDelegate {
                 let jitter = Double.random(in: 0.0...1.0)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0 + jitter, execute: workItem)
             } else {
-                // If we don't have internet, forward to other peers
-                // Only rebroadcast if this is the first time we have seen this escrowTx recently
-                print("📡 No internet, forwarding payment request to other peers (first seen)")
-                broadcastMessage(message)
+                // If we don't have internet, forward to other peers with updated broadcaster
+                print("📡 No internet, forwarding payment request to other peers (broadcaster: \(broadcaster?.prefix(8) ?? "nil"))")
+                let updatedMessage = MeshMessage.paymentRequest(
+                    recipient: recipient,
+                    amount: amount,
+                    escrowTx: escrowTx,
+                    sender: sender,
+                    broadcaster: broadcaster
+                )
+                broadcastMessage(updatedMessage)
             }
 
         case .paymentConfirmation(let escrowId, let status):
@@ -609,7 +628,14 @@ extension MeshNetworkManager: MCSessionDelegate {
     }
 
     // MARK: - Relay Logic
-    private func relayPaymentToNetwork(recipient: String, amount: String, txXDR: String) async {
+    private func relayPaymentToNetwork(
+        recipient: String,
+        amount: String,
+        txXDR: String,
+        sender: String,
+        broadcaster: String,
+        relayer: String
+    ) async {
         guard let walletManager = walletManager,
               let amountDouble = Double(amount) else {
             print("❌ Cannot relay payment - invalid data")
@@ -623,7 +649,33 @@ extension MeshNetworkManager: MCSessionDelegate {
                 amount: amountDouble
             )
 
+            // Calculate fees for rewards distribution
+            let fees = RewardsContract.calculateFees(amount: amountDouble)
+
             print("✅ Relayed payment to network. TX Hash: \(txHash)")
+            print("💰 Fee Distribution:")
+            print("   Sender: \(sender.prefix(8))...")
+            print("   Recipient: \(recipient.prefix(8))... receives \(fees.net) XLM")
+            print("   Broadcaster: \(broadcaster.prefix(8))... earns \(fees.broadcaster) XLM")
+            print("   Relayer: \(relayer.prefix(8))... earns \(fees.relayer) XLM")
+            print("   Protocol earns: \(fees.protocol) XLM")
+
+            
+            Task {
+                do {
+                    let fees = RewardsContract.calculateFees(amount: amountDouble)
+                    let protocolG = RewardsContract.protocolAddress
+                    // Pay broadcaster 0.5% (if different from relayer)
+                    if broadcaster != relayer && fees.broadcaster > 0 {
+                        _ = await walletManager.sendPayment(to: broadcaster, amount: fees.broadcaster)
+                    }
+                    // Pay protocol 0.4%
+                    if fees.protocol > 0 {
+                        _ = await walletManager.sendPayment(to: protocolG, amount: fees.protocol)
+                    }
+                    print("🏆 Rewards distributed via classic payments")
+                }
+            }
 
             // Broadcast confirmation back through mesh
             let confirmation = MeshMessage.paymentConfirmation(
@@ -633,7 +685,7 @@ extension MeshNetworkManager: MCSessionDelegate {
             broadcastMessage(confirmation)
 
             await MainActor.run {
-                receivedMessages.append("Relayed payment ✓")
+                receivedMessages.append("Relayed payment ✓ (earned \(String(format: "%.4f", fees.relayer)) XLM)")
             }
         } catch {
             print("❌ Failed to relay payment: \(error.localizedDescription)")
