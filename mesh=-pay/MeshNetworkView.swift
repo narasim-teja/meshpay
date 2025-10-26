@@ -3,17 +3,8 @@ import MultipeerConnectivity
 
 struct MeshNetworkView: View {
     @EnvironmentObject var walletManager: WalletManager
-    @StateObject private var meshManager: MeshNetworkManager
+    @EnvironmentObject var meshManager: MeshNetworkManager
     @State private var showTestMessage = false
-
-    init(walletManager: WalletManager) {
-        _meshManager = StateObject(wrappedValue: MeshNetworkManager(walletPublicKey: walletManager.publicKey))
-    }
-
-    init() {
-        // Fallback initializer for preview
-        _meshManager = StateObject(wrappedValue: MeshNetworkManager())
-    }
 
     var body: some View {
         NavigationView {
@@ -48,12 +39,6 @@ struct MeshNetworkView: View {
             }
             .navigationTitle("Mesh Network")
             .navigationBarTitleDisplayMode(.large)
-            .onAppear {
-                meshManager.startMesh()
-            }
-            .onDisappear {
-                meshManager.stopMesh()
-            }
         }
     }
 

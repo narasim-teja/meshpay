@@ -57,28 +57,109 @@ Alice (no internet) → Bob's phone (relay) → Carol's phone (has internet) →
 
 ## 📱 5-Phase Development Plan
 
-### Phase 1: Basic Wallet (Days 1-2)
+### Phase 1: Basic Wallet (Days 1-2) ✅ COMPLETE
 **Goal:** Create secure Stellar wallet with simple UI
 
 **Core Features:**
-- Generate Stellar keypair
-- Store private key in iOS Keychain
-- Fund testnet account (Friendbot)
-- Show balance and address
-- Simple send/receive UI
+- ✅ Generate Stellar keypair
+- ✅ Store private key in iOS Keychain
+- ✅ Fund testnet account (Friendbot)
+- ✅ Show balance and address
+- ✅ Simple send/receive UI
 
 **Deliverables:**
-- Can create wallet
-- Can send XLM online
-- Transaction history works
-- QR code for receiving
+- ✅ Can create wallet
+- ✅ Can send XLM online
+- ✅ Transaction history works
+- ✅ QR code for receiving
 
-**Testing:** Send real payments on Stellar testnet
+**Testing:** ✅ Send real payments on Stellar testnet
 
 ---
 
-### Phase 2: Smart Contract Escrow (Days 3-4)
+### Phase 3: Mesh Networking (Days 3-4) ✅ COMPLETE
+**Goal:** Enable offline message routing between devices
+
+**Status:** IMPLEMENTED FIRST (reordered from original plan)
+
+**Core Features:**
+- ✅ MultipeerConnectivity setup (Bluetooth + WiFi)
+- ✅ Auto-discover nearby devices using wallet public keys
+- ✅ Route messages through mesh network
+- ✅ Handle peer connections/disconnections with cleanup
+- ✅ Beautiful network visualization with animated nodes
+- ✅ Battery level and internet status monitoring
+- ✅ Duplicate connection prevention
+- ✅ Privacy permissions configured
+
+**Message Types:**
+```swift
+enum MeshMessage {
+    case paymentRequest(recipient: String, amount: String, escrowTx: String)
+    case paymentConfirmation(escrowId: String, status: String)
+    case peerInfo(hasInternet: Bool, batteryLevel: Float)
+    case ping
+}
+```
+
+**Files Created:**
+- `MeshNetworkManager.swift` - Core mesh networking logic
+- `MeshNetworkView.swift` - Network visualization UI
+- `mesh--pay-Info.plist` - Bluetooth/Network permissions
+
+**Testing:** ✅ Peer discovery works, connections stable, pings routing successfully
+
+---
+
+### Phase 4: Offline Payment Flow (Days 5-6) 🔄 IN PROGRESS
+**Goal:** Complete end-to-end offline payment experience
+
+**Next Steps:**
+1. **Detect sender's online/offline status** (use existing `hasInternet` from MeshNetworkManager)
+2. **Modify SendPaymentView to support offline mode:**
+   - If sender is offline: Create signed transaction and broadcast via mesh
+   - If sender is online: Send normally via Stellar network
+3. **Create transaction payload for mesh broadcast:**
+   - Signed transaction XDR (base64 encoded)
+   - Recipient address
+   - Amount
+   - Sender's public key
+4. **Implement relay logic on online peers:**
+   - Listen for `paymentRequest` messages
+   - Submit transaction to Stellar Horizon
+   - Broadcast confirmation back through mesh
+5. **Queue system for offline transactions:**
+   - Store pending transactions locally
+   - Auto-retry when connection available
+   - Show status in UI (pending/submitted/confirmed)
+
+**Core Features TO DO:**
+- [ ] Detect online/offline status in SendPaymentView
+- [ ] Create signed transaction when offline
+- [ ] Broadcast transaction via mesh to find internet connection
+- [ ] Implement relay node logic (online devices submit for offline ones)
+- [ ] Queue transactions locally with Core Data
+- [ ] Auto-sync when back online
+- [ ] Show pending/confirmed states in UI
+- [ ] Handle edge cases (no peers, all peers offline, etc.)
+
+**User Flow:**
+1. Alice (offline) sends 100 XLM to Bob
+2. App creates signed transaction locally
+3. Broadcasts to nearby devices via Bluetooth
+4. Carol's device (online) receives and submits to Stellar
+5. Transaction confirmed on blockchain
+6. Bob's app auto-detects incoming payment
+7. Alice sees confirmation when back online
+
+**Testing:** Full offline payment between 2 devices (1 offline, 1 relay, 1 recipient)
+
+---
+
+### Phase 2: Smart Contract Escrow (Days 7) 📋 PLANNED
 **Goal:** Deploy escrow contract and integrate with app
+
+**Status:** DEFERRED - Will implement after basic offline payments work
 
 **Core Features:**
 - Write Rust escrow contract (Soroban)
@@ -103,64 +184,17 @@ refund_escrow(escrow_id: u64)
 
 ---
 
-### Phase 3: Mesh Networking (Days 5-6)
-**Goal:** Enable offline message routing between devices
-
-**Core Features:**
-- MultipeerConnectivity setup (Bluetooth + WiFi)
-- Auto-discover nearby devices
-- Route messages through mesh network
-- Handle peer connections/disconnections
-- Grand network visualization (should be fancy) -- visually appealing 
-
-**Message Types:**
-```swift
-enum MeshMessage {
-    case paymentRequest(recipient: String, amount: String, escrowTx: String)
-    case paymentConfirmation(escrowId: String, status: String)
-    case peerInfo(hasInternet: Bool, batteryLevel: Float)
-}
-```
-
-**Testing:** 3 devices → Offline send → Routes through mesh → Online device submits
-
----
-
-### Phase 4: Offline Payment Flow (Days 7)
-**Goal:** Complete end-to-end offline payment experience
-
-**Core Features:**
-- Detect online/offline status
-- Create escrow transaction when offline
-- Broadcast via mesh to find internet connection
-- Queue transactions locally
-- Auto-sync when back online
-- Show pending/confirmed states in UI
-
-**User Flow:**
-1. Alice (offline) sends 100 XLM to Bob
-2. App creates signed escrow transaction
-3. Broadcasts to nearby devices via Bluetooth
-4. Carol's device (online) submits to Stellar
-5. Escrow contract locks Alice's funds
-6. Bob's app auto-detects claimable escrow
-7. Claims payment in background
-8. Alice sees confirmation when back online
-
-**Testing:** Full offline payment between 2 devices
-
----
-
-### Phase 5: Polish & Demo (Day 8)
+### Phase 5: Polish & Demo (Day 8) 📋 PLANNED
 **Goal:** Production-ready app with impressive demo
 
 **Polish Features:**
 - Smooth animations and transitions
 - Loading states and error handling
 - Network status indicators
-- Transaction history with status
+- Transaction history with status badges
 - Face ID for payment authorization
 - App icons and launch screen
+- Haptic feedback
 
 **Demo Preparation:**
 - Two-device demo script

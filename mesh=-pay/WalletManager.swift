@@ -12,6 +12,12 @@ import stellarsdk
 import Combine
 import LocalAuthentication
 
+enum WalletError: Error {
+    case authenticationFailed
+    case invalidTransaction
+    case submissionFailed
+}
+
 class WalletManager: ObservableObject {
     @Published var publicKey: String = ""
     @Published var balance: String = "0.00"
@@ -21,6 +27,13 @@ class WalletManager: ObservableObject {
     private let keychainService = "com.meshpay.stellar"
     private let keychainAccount = "stellar-private-key"
     private let sdk = StellarSDK(withHorizonUrl: "https://horizon-testnet.stellar.org")
+
+    // Cache account response for offline transactions
+    private var cachedAccountResponse: AccountResponse?
+    private var lastAccountFetch: Date?
+
+    // Alternative: Cache the raw sequence number to avoid type issues
+    private var cachedSequenceNumber: Int64?
 
     init() {
         loadWallet()
@@ -212,32 +225,151 @@ class WalletManager: ObservableObject {
     }
 
     func fetchBalance() async {
-        guard !publicKey.isEmpty else { return }
+        guard !publicKey.isEmpty else {
+            print("⚠️ Cannot fetch balance - public key is empty")
+            return
+        }
 
-        let horizonURL = "https://horizon-testnet.stellar.org/accounts/\(publicKey)"
+        print("🔄 Fetching balance for \(publicKey.prefix(8))...")
 
-        guard let url = URL(string: horizonURL) else { return }
-
+        // Also fetch full account details to cache for offline use
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let accountResponse = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AccountResponse, Error>) in
+                sdk.accounts.getAccountDetails(accountId: publicKey) { response in
+                    switch response {
+                    case .success(let details):
+                        continuation.resume(returning: details)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    @unknown default:
+                        continuation.resume(throwing: NSError(domain: "WalletManager", code: -1))
+                    }
+                }
+            }
 
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let balances = json["balances"] as? [[String: Any]] {
+            // Cache the account response and sequence number
+            await MainActor.run {
+                self.cachedAccountResponse = accountResponse
+                self.cachedSequenceNumber = accountResponse.sequenceNumber
+                self.lastAccountFetch = Date()
+                print("✅ Account data cached! Sequence: \(accountResponse.sequenceNumber)")
+            }
 
-                for balance in balances {
-                    if let assetType = balance["asset_type"] as? String,
-                       assetType == "native",
-                       let amount = balance["balance"] as? String {
-
-                        await MainActor.run {
-                            self.balance = String(format: "%.2f", Double(amount) ?? 0.0)
+            // Extract balance
+            for balance in accountResponse.balances {
+                if balance.assetType == AssetTypeAsString.NATIVE {
+                    await MainActor.run {
+                        // balance.balance is a String, convert to Double for formatting
+                        if let balanceValue = Double(balance.balance) {
+                            self.balance = String(format: "%.2f", balanceValue)
+                            print("💰 Balance updated: \(self.balance) XLM")
+                        } else {
+                            self.balance = balance.balance
+                            print("💰 Balance updated (raw): \(balance.balance) XLM")
                         }
                     }
                 }
             }
         } catch {
-            print("Error fetching balance: \(error)")
+            print("❌ Error fetching balance: \(error)")
         }
+    }
+
+
+    // Create and sign a transaction for offline broadcasting
+    func createSignedTransaction(to destination: String, amount: Double) async throws -> String {
+        guard let privateKey = loadPrivateKey(withBiometrics: true) else {
+            throw WalletError.authenticationFailed
+        }
+
+        let sourceKeyPair = try KeyPair(secretSeed: privateKey)
+
+        // Use cached account response if available, otherwise try to fetch
+        let accountResponse: AccountResponse
+        if let cached = cachedAccountResponse {
+            print("📦 Using cached account data for offline transaction (sequence: \(cached.sequenceNumber))")
+            accountResponse = cached
+        } else {
+            print("🌐 No cached data available, attempting to fetch account details...")
+            accountResponse = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AccountResponse, Error>) in
+                sdk.accounts.getAccountDetails(accountId: sourceKeyPair.accountId) { response in
+                    switch response {
+                    case .success(let details):
+                        continuation.resume(returning: details)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    @unknown default:
+                        continuation.resume(throwing: NSError(domain: "WalletManager", code: -1))
+                    }
+                }
+            }
+        }
+
+        // For offline transactions, assume we're doing a simple payment
+        // (destination account must already exist)
+        let operation = try PaymentOperation(
+            sourceAccountId: sourceKeyPair.accountId,
+            destinationAccountId: destination,
+            asset: Asset(type: AssetType.ASSET_TYPE_NATIVE)!,
+            amount: Decimal(amount)
+        )
+
+        // Build and sign transaction
+        let transaction = try stellarsdk.Transaction(
+            sourceAccount: accountResponse,
+            operations: [operation],
+            memo: Memo.none
+        )
+        try transaction.sign(keyPair: sourceKeyPair, network: Network.testnet)
+
+        // Return XDR (base64 encoded transaction)
+        return try transaction.encodedEnvelope()
+    }
+
+    // Submit a pre-signed transaction XDR to the network
+    func submitSignedTransaction(xdr: String, destination: String, amount: Double) async throws -> String {
+        // Submit XDR directly to Horizon
+        let horizonURL = "https://horizon-testnet.stellar.org/transactions"
+        guard let url = URL(string: horizonURL) else {
+            throw WalletError.invalidTransaction
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "tx=\(xdr)".data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WalletError.submissionFailed
+        }
+
+        if httpResponse.statusCode == 200 {
+            // Parse response to get transaction hash
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let hash = json["hash"] as? String {
+
+                // Add to history
+                let newTransaction = PaymentTransaction(
+                    id: hash,
+                    type: .sent,
+                    amount: amount,
+                    destination: destination,
+                    timestamp: Date(),
+                    status: .confirmed
+                )
+
+                await MainActor.run {
+                    transactions.insert(newTransaction, at: 0)
+                }
+
+                await fetchBalance()
+                return hash
+            }
+        }
+
+        throw WalletError.submissionFailed
     }
 
 

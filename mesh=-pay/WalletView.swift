@@ -9,6 +9,7 @@ import SwiftUI
 
 struct WalletView: View {
     @EnvironmentObject var walletManager: WalletManager
+    @EnvironmentObject var meshManager: MeshNetworkManager
     @State private var showingSendSheet = false
     @State private var showingReceiveSheet = false
     @State private var showingSettings = false
@@ -83,6 +84,7 @@ struct WalletView: View {
         .sheet(isPresented: $showingSendSheet) {
             SendPaymentView()
                 .environmentObject(walletManager)
+                .environmentObject(meshManager)
         }
         .sheet(isPresented: $showingReceiveSheet) {
             ReceivePaymentView()
@@ -93,8 +95,9 @@ struct WalletView: View {
                 .environmentObject(walletManager)
         }
         .sheet(isPresented: $showingMeshNetwork) {
-            MeshNetworkView(walletManager: walletManager)
+            MeshNetworkView()
                 .environmentObject(walletManager)
+                .environmentObject(meshManager)
         }
         .task {
             await walletManager.fetchBalance()

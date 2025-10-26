@@ -9,6 +9,7 @@ import SwiftUI
 
 struct SendPaymentView: View {
     @EnvironmentObject var walletManager: WalletManager
+    @EnvironmentObject var meshManager: MeshNetworkManager
     @Environment(\.dismiss) var dismiss
 
     @State private var recipientAddress = ""
@@ -16,10 +17,29 @@ struct SendPaymentView: View {
     @State private var isSending = false
     @State private var showError = false
     @State private var errorMessage = ""
+    @State private var showQRScanner = false
 
     var body: some View {
         NavigationView {
             Form {
+                // Online/Offline Status
+                Section {
+                    HStack {
+                        Circle()
+                            .fill(meshManager.hasInternet ? Color.green : Color.orange)
+                            .frame(width: 8, height: 8)
+                        Text(meshManager.hasInternet ? "Online" : "Offline")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if !meshManager.hasInternet {
+                            Text("\(meshManager.connectedPeers.count) peers")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 Section(header: Text("Recipient")) {
                     HStack {
                         TextField("Stellar Address (G...)", text: $recipientAddress)
@@ -27,9 +47,10 @@ struct SendPaymentView: View {
                             .autocorrectionDisabled()
 
                         Button(action: {
-                            // TODO: Add QR scanner
+                            showQRScanner = true
                         }) {
                             Image(systemName: "qrcode.viewfinder")
+                                .font(.title2)
                         }
                     }
                 }
@@ -81,6 +102,9 @@ struct SendPaymentView: View {
             } message: {
                 Text(errorMessage)
             }
+            .fullScreenCover(isPresented: $showQRScanner) {
+                QRScannerView(scannedAddress: $recipientAddress)
+            }
         }
     }
 
@@ -102,17 +126,65 @@ struct SendPaymentView: View {
         isSending = true
 
         Task {
-            let success = await walletManager.sendPayment(to: recipientAddress, amount: amountValue)
+            if meshManager.hasInternet {
+                // Online: Send directly via Stellar network
+                let success = await walletManager.sendPayment(to: recipientAddress, amount: amountValue)
+
+                await MainActor.run {
+                    isSending = false
+
+                    if success {
+                        dismiss()
+                    } else {
+                        errorMessage = "Failed to send payment"
+                        showError = true
+                    }
+                }
+            } else {
+                // Offline: Create signed transaction and broadcast via mesh
+                await sendOfflinePayment(to: recipientAddress, amount: amountValue)
+            }
+        }
+    }
+
+    func sendOfflinePayment(to recipient: String, amount: Double) async {
+        do {
+            print("📴 Creating offline payment transaction")
+            // Create and sign transaction
+            let signedTxXDR = try await walletManager.createSignedTransaction(to: recipient, amount: amount)
+            print("✅ Transaction signed: \(signedTxXDR.prefix(50))...")
+
+            // Broadcast via mesh network
+            let paymentRequest = MeshMessage.paymentRequest(
+                recipient: recipient,
+                amount: String(amount),
+                escrowTx: signedTxXDR
+            )
 
             await MainActor.run {
-                isSending = false
+                meshManager.broadcastMessage(paymentRequest)
 
-                if success {
-                    dismiss()
-                } else {
-                    errorMessage = "Failed to send payment"
-                    showError = true
-                }
+                // Add to pending transactions
+                let pendingTx = PaymentTransaction(
+                    id: UUID().uuidString,
+                    type: .sent,
+                    amount: amount,
+                    destination: recipient,
+                    timestamp: Date(),
+                    status: .pending
+                )
+                walletManager.transactions.insert(pendingTx, at: 0)
+
+                isSending = false
+                dismiss()
+            }
+
+            print("📡 Broadcasted offline payment via mesh network")
+        } catch {
+            await MainActor.run {
+                isSending = false
+                errorMessage = "Failed to create offline payment: \(error.localizedDescription)"
+                showError = true
             }
         }
     }

@@ -88,6 +88,10 @@ class MeshNetworkManager: NSObject, ObservableObject {
 
     private var walletPublicKey: String = ""
     private var invitedPeers = Set<String>() // Track peers we've already invited
+    private var discoveredPeers = Set<MCPeerID>() // Track all discovered peers for reconnection
+
+    // Relay functionality - reference to wallet manager for submitting transactions
+    weak var walletManager: WalletManager?
 
     init(walletPublicKey: String = "") {
         // Create unique peer ID using truncated wallet public key
@@ -104,8 +108,14 @@ class MeshNetworkManager: NSObject, ObservableObject {
         }
         self.myPeerID = MCPeerID(displayName: displayName)
 
-        // Initialize session with optional encryption for better compatibility
-        self.session = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .optional)
+        // Initialize session with:
+        // - No encryption for better compatibility and performance
+        // - This allows fallback to Bluetooth when WiFi is unavailable
+        self.session = MCSession(
+            peer: myPeerID,
+            securityIdentity: nil,
+            encryptionPreference: .none  // Better for Bluetooth fallback
+        )
 
         // Initialize advertiser (makes this device discoverable)
         self.advertiser = MCNearbyServiceAdvertiser(peer: myPeerID, discoveryInfo: nil, serviceType: serviceType)
@@ -128,6 +138,11 @@ class MeshNetworkManager: NSObject, ObservableObject {
 
     // MARK: - Start/Stop Mesh Network
     func startMesh() {
+        guard !isAdvertising && !isBrowsing else {
+            print("🌐 Mesh network already running")
+            return
+        }
+
         advertiser.startAdvertisingPeer()
         browser.startBrowsingForPeers()
         isAdvertising = true
@@ -135,10 +150,32 @@ class MeshNetworkManager: NSObject, ObservableObject {
         print("🌐 Mesh network started - Advertising and Browsing")
 
         // Start periodic connection cleanup (less frequent to reduce overhead)
-        Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupStaleConnections()
             }
+        }
+
+        // Restart browsing/advertising periodically to handle WiFi state changes
+        Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.restartDiscovery()
+            }
+        }
+    }
+
+    private func restartDiscovery() {
+        print("🔄 Restarting discovery to handle network changes")
+
+        // Stop and restart browsing/advertising to refresh Bluetooth/WiFi connections
+        advertiser.stopAdvertisingPeer()
+        browser.stopBrowsingForPeers()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            self.advertiser.startAdvertisingPeer()
+            self.browser.startBrowsingForPeers()
+            print("🔄 Discovery restarted")
         }
     }
 
@@ -309,6 +346,23 @@ extension MeshNetworkManager: MCSessionDelegate {
                 // Allow re-invitation after disconnect
                 invitedPeers.remove(peerID.displayName)
 
+                // Attempt to reconnect after a delay
+                if discoveredPeers.contains(peerID) {
+                    print("🔄 Will attempt to reconnect to \(peerID.displayName)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        guard let self = self else { return }
+                        let stillDiscovered = self.discoveredPeers.contains(peerID)
+                        let notConnected = !self.session.connectedPeers.contains(peerID)
+                        let notInvited = !self.invitedPeers.contains(peerID.displayName)
+
+                        if stillDiscovered && notConnected && notInvited {
+                            print("🔄 Reconnecting to \(peerID.displayName)")
+                            self.invitedPeers.insert(peerID.displayName)
+                            self.browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
+                        }
+                    }
+                }
+
             @unknown default:
                 print("⚠️ Unknown peer state")
             }
@@ -333,9 +387,56 @@ extension MeshNetworkManager: MCSessionDelegate {
             print("💰 Received payment request: \(amount) to \(recipient)")
             receivedMessages.append("Payment: \(amount) to \(recipient.prefix(8))...")
 
+            // If we have internet, relay the transaction to Stellar network
+            if hasInternet, let walletManager = walletManager {
+                Task {
+                    await relayPaymentToNetwork(
+                        recipient: recipient,
+                        amount: amount,
+                        txXDR: escrowTx
+                    )
+                }
+            } else {
+                // If we don't have internet, forward to other peers
+                print("📡 No internet, forwarding payment request to other peers")
+                broadcastMessage(message)
+            }
+
         case .paymentConfirmation(let escrowId, let status):
             print("✅ Received payment confirmation: \(escrowId) - \(status)")
             receivedMessages.append("Confirmation: \(status)")
+
+            // Update transaction status in wallet manager
+            if let walletManager = walletManager {
+                Task {
+                    await MainActor.run {
+                        // Find and update pending transaction
+                        if let index = walletManager.transactions.firstIndex(where: {
+                            $0.status == .pending
+                        }) {
+                            var updatedTx = walletManager.transactions[index]
+                            // Create new transaction with updated status
+                            let newTx = PaymentTransaction(
+                                id: escrowId,
+                                type: updatedTx.type,
+                                amount: updatedTx.amount,
+                                destination: updatedTx.destination,
+                                timestamp: updatedTx.timestamp,
+                                status: status == "confirmed" ? .confirmed : .failed
+                            )
+                            walletManager.transactions[index] = newTx
+                            print("✅ Updated transaction status to \(status)")
+
+                            // Refresh balance if confirmed
+                            if status == "confirmed" {
+                                Task {
+                                    await walletManager.fetchBalance()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
         case .peerInfo(let hasInternet, let batteryLevel):
             // Update peer info
@@ -349,6 +450,45 @@ extension MeshNetworkManager: MCSessionDelegate {
         case .ping:
             print("🏓 Received ping from \(peerID.displayName)")
             receivedMessages.append("Ping from \(peerID.displayName)")
+        }
+    }
+
+    // MARK: - Relay Logic
+    private func relayPaymentToNetwork(recipient: String, amount: String, txXDR: String) async {
+        guard let walletManager = walletManager,
+              let amountDouble = Double(amount) else {
+            print("❌ Cannot relay payment - invalid data")
+            return
+        }
+
+        do {
+            let txHash = try await walletManager.submitSignedTransaction(
+                xdr: txXDR,
+                destination: recipient,
+                amount: amountDouble
+            )
+
+            print("✅ Relayed payment to network. TX Hash: \(txHash)")
+
+            // Broadcast confirmation back through mesh
+            let confirmation = MeshMessage.paymentConfirmation(
+                escrowId: txHash,
+                status: "confirmed"
+            )
+            broadcastMessage(confirmation)
+
+            await MainActor.run {
+                receivedMessages.append("Relayed payment ✓")
+            }
+        } catch {
+            print("❌ Failed to relay payment: \(error.localizedDescription)")
+
+            // Broadcast failure
+            let confirmation = MeshMessage.paymentConfirmation(
+                escrowId: UUID().uuidString,
+                status: "failed"
+            )
+            broadcastMessage(confirmation)
         }
     }
 
@@ -390,6 +530,9 @@ extension MeshNetworkManager: MCNearbyServiceBrowserDelegate {
         print("🔍 Found peer: \(peerID.displayName)")
         // Auto-invite found peers if not already connected/invited
         Task { @MainActor in
+            // Track discovered peer
+            self.discoveredPeers.insert(peerID)
+
             let isAlreadyConnected = self.session.connectedPeers.contains(peerID)
             let isConnecting = self.connectedPeers.contains { $0.peerID == peerID && $0.state == .connecting }
             let alreadyInvited = self.invitedPeers.contains(peerID.displayName)
@@ -405,6 +548,7 @@ extension MeshNetworkManager: MCNearbyServiceBrowserDelegate {
         print("👋 Lost peer: \(peerID.displayName)")
         Task { @MainActor in
             self.invitedPeers.remove(peerID.displayName)
+            self.discoveredPeers.remove(peerID)
         }
     }
 }
