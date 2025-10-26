@@ -14,6 +14,8 @@ struct WalletView: View {
     @State private var showingReceiveSheet = false
     @State private var showingSettings = false
     @State private var showingMeshNetwork = false
+    @State private var toastMessage: String? = nil
+    @State private var toastColor: Color = .green
 
     var body: some View {
         ScrollView {
@@ -31,11 +33,34 @@ struct WalletView: View {
                         showingReceiveSheet = true
                     }
 
-                    ActionButton(icon: "arrow.clockwise.circle.fill", title: "Refresh", color: .orange) {
+                    ActionButton(icon: "arrow.clockwise.circle.fill", title: meshManager.isRefreshingBalance ? "Refreshing..." : "Refresh", color: .orange) {
                         Task {
-                            await walletManager.fetchBalance()
+                            if meshManager.hasInternet && !meshManager.offlineMode {
+                                await walletManager.fetchBalance()
+                                await MainActor.run {
+                                    withAnimation {
+                                        toastColor = .green
+                                        toastMessage = "Refreshed online ✓"
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                        withAnimation { toastMessage = nil }
+                                    }
+                                }
+                            } else {
+                                meshManager.requestBalanceFor(accountId: walletManager.publicKey)
+                                await MainActor.run {
+                                    withAnimation {
+                                        toastColor = .blue
+                                        toastMessage = "Refreshed via mesh ✓"
+                                    }
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                        withAnimation { toastMessage = nil }
+                                    }
+                                }
+                            }
                         }
                     }
+                    .disabled(meshManager.isRefreshingBalance)
                 }
                 .padding(.horizontal)
 
@@ -101,6 +126,13 @@ struct WalletView: View {
         }
         .task {
             await walletManager.fetchBalance()
+        }
+        .overlay(alignment: .top) {
+            if let message = toastMessage {
+                ToastBanner(message: message, color: toastColor)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .padding(.top, 8)
+            }
         }
     }
 }
@@ -251,6 +283,28 @@ struct StatusBadge: View {
             .background(statusColor.opacity(0.2))
             .foregroundColor(statusColor)
             .cornerRadius(4)
+    }
+}
+
+struct ToastBanner: View {
+    let message: String
+    let color: Color
+
+    var body: some View {
+        HStack {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(color)
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.primary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
+        .padding(.horizontal)
     }
 }
 

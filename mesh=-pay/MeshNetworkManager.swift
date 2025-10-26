@@ -2,6 +2,7 @@ import Foundation
 import MultipeerConnectivity
 import Combine
 import Network
+import stellarsdk
 
 // MARK: - Mesh Message Types
 enum MeshMessage: Codable {
@@ -9,9 +10,11 @@ enum MeshMessage: Codable {
     case paymentConfirmation(escrowId: String, status: String)
     case peerInfo(hasInternet: Bool, batteryLevel: Float)
     case ping
+    case balanceRequest(accountId: String)
+    case balanceUpdate(accountId: String, balance: String, sequence: Int64)
 
     enum CodingKeys: String, CodingKey {
-        case type, recipient, amount, escrowTx, escrowId, status, hasInternet, batteryLevel
+        case type, recipient, amount, escrowTx, escrowId, status, hasInternet, batteryLevel, accountId, balance, sequence
     }
 
     init(from decoder: Decoder) throws {
@@ -34,6 +37,14 @@ enum MeshMessage: Codable {
             self = .peerInfo(hasInternet: hasInternet, batteryLevel: batteryLevel)
         case "ping":
             self = .ping
+        case "balanceRequest":
+            let accountId = try container.decode(String.self, forKey: .accountId)
+            self = .balanceRequest(accountId: accountId)
+        case "balanceUpdate":
+            let accountId = try container.decode(String.self, forKey: .accountId)
+            let balance = try container.decode(String.self, forKey: .balance)
+            let sequence = try container.decode(Int64.self, forKey: .sequence)
+            self = .balanceUpdate(accountId: accountId, balance: balance, sequence: sequence)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown message type")
         }
@@ -58,6 +69,14 @@ enum MeshMessage: Codable {
             try container.encode(batteryLevel, forKey: .batteryLevel)
         case .ping:
             try container.encode("ping", forKey: .type)
+        case .balanceRequest(let accountId):
+            try container.encode("balanceRequest", forKey: .type)
+            try container.encode(accountId, forKey: .accountId)
+        case .balanceUpdate(let accountId, let balance, let sequence):
+            try container.encode("balanceUpdate", forKey: .type)
+            try container.encode(accountId, forKey: .accountId)
+            try container.encode(balance, forKey: .balance)
+            try container.encode(sequence, forKey: .sequence)
         }
     }
 }
@@ -88,6 +107,7 @@ class MeshNetworkManager: NSObject, ObservableObject {
     @Published var hasInternet = true
     @Published var offlineMode = false // When true, skip active internet checks for demos
     @Published var networkPathSummary: String = "Unknown"
+    @Published var isRefreshingBalance: Bool = false
 
     private var walletPublicKey: String = ""
     private var invitedPeers = Set<String>() // Track peers we've already invited
@@ -98,6 +118,8 @@ class MeshNetworkManager: NSObject, ObservableObject {
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "mesh.path.monitor")
     private var discoveryRestartWorkItem: DispatchWorkItem?
+    private var pendingRelayTasks: [String: DispatchWorkItem] = [:]
+    private var seenPaymentRequests: [String: Date] = [:] // escrowTx -> first seen time
 
     // Relay functionality - reference to wallet manager for submitting transactions
     weak var walletManager: WalletManager?
@@ -211,6 +233,10 @@ class MeshNetworkManager: NSObject, ObservableObject {
         connectedPeers = connectedPeers.filter { peer in
             actuallyConnected.contains(peer.peerID)
         }
+
+        // Periodically drop dedupe entries older than 2 minutes
+        let now = Date()
+        seenPaymentRequests = seenPaymentRequests.filter { now.timeIntervalSince($0.value) < 120 }
     }
 
     func stopMesh() {
@@ -431,27 +457,45 @@ extension MeshNetworkManager: MCSessionDelegate {
     private func handleReceivedMessage(_ message: MeshMessage, from peerID: MCPeerID) {
         switch message {
         case .paymentRequest(let recipient, let amount, let escrowTx):
+            // Dedupe identical requests to avoid storms
+            if let ts = seenPaymentRequests[escrowTx], Date().timeIntervalSince(ts) < 60 {
+                return
+            }
+            seenPaymentRequests[escrowTx] = Date()
+
             print("💰 Received payment request: \(amount) to \(recipient)")
             receivedMessages.append("Payment: \(amount) to \(recipient.prefix(8))...")
 
             // If we have internet, relay the transaction to Stellar network
             if hasInternet, let walletManager = walletManager {
-                Task {
-                    await relayPaymentToNetwork(
-                        recipient: recipient,
-                        amount: amount,
-                        txXDR: escrowTx
-                    )
+                // Debounce/hold for ~3-4 seconds to avoid collisions across multiple online peers
+                if let existing = pendingRelayTasks[escrowTx] { existing.cancel() }
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    Task {
+                        await self.relayPaymentToNetwork(
+                            recipient: recipient,
+                            amount: amount,
+                            txXDR: escrowTx
+                        )
+                        await MainActor.run { self.pendingRelayTasks.removeValue(forKey: escrowTx) }
+                    }
                 }
+                pendingRelayTasks[escrowTx] = workItem
+                let jitter = Double.random(in: 0.0...1.0)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0 + jitter, execute: workItem)
             } else {
                 // If we don't have internet, forward to other peers
-                print("📡 No internet, forwarding payment request to other peers")
+                // Only rebroadcast if this is the first time we have seen this escrowTx recently
+                print("📡 No internet, forwarding payment request to other peers (first seen)")
                 broadcastMessage(message)
             }
 
         case .paymentConfirmation(let escrowId, let status):
             print("✅ Received payment confirmation: \(escrowId) - \(status)")
             receivedMessages.append("Confirmation: \(status)")
+            // Cancel any pending relay tasks since confirmation arrived
+            pendingRelayTasks.removeAll()
 
             // Update transaction status in wallet manager
             if let walletManager = walletManager {
@@ -474,10 +518,14 @@ extension MeshNetworkManager: MCSessionDelegate {
                             walletManager.transactions[index] = newTx
                             print("✅ Updated transaction status to \(status)")
 
-                            // Refresh balance if confirmed
+                            // Refresh balance if confirmed; if offline, request via mesh
                             if status == "confirmed" {
                                 Task {
-                                    await walletManager.fetchBalance()
+                                    if self.hasInternet {
+                                        await walletManager.fetchBalance()
+                                    } else {
+                                        self.requestBalanceFor(accountId: walletManager.publicKey)
+                                    }
                                 }
                             }
                         }
@@ -497,6 +545,66 @@ extension MeshNetworkManager: MCSessionDelegate {
         case .ping:
             print("🏓 Received ping from \(peerID.displayName)")
             receivedMessages.append("Ping from \(peerID.displayName)")
+        case .balanceRequest(let accountId):
+            // If we have internet, respond with latest balance for requested account
+            if hasInternet, let walletManager = walletManager {
+                Task {
+                    // Fetch remote account balance (or use cache if it's our own)
+                    if accountId == walletManager.publicKey {
+                        await walletManager.fetchBalance()
+                        await MainActor.run {
+                            let seq = walletManager.getCachedSequenceNumber() ?? 0
+                            let update = MeshMessage.balanceUpdate(
+                                accountId: accountId,
+                                balance: walletManager.balance,
+                                sequence: seq
+                            )
+                            self.sendMessage(update, to: [peerID])
+                        }
+                    } else {
+                        // Fetch arbitrary account details and reply
+                        if let details = await walletManager.fetchAccountDetails(accountId: accountId) {
+                            let native = details.balances.first { $0.assetType == AssetTypeAsString.NATIVE }?.balance ?? "0"
+                            let update = MeshMessage.balanceUpdate(
+                                accountId: accountId,
+                                balance: native,
+                                sequence: details.sequenceNumber
+                            )
+                            await MainActor.run {
+                                self.sendMessage(update, to: [peerID])
+                            }
+                        }
+                    }
+                }
+            }
+        case .balanceUpdate(let accountId, let balance, let sequence):
+            // Update our UI/cache if this is our account
+            if let walletManager = walletManager, accountId == walletManager.publicKey {
+                Task {
+                    await MainActor.run {
+                        walletManager.balance = String(format: "%.2f", Double(balance) ?? 0.0)
+                        // keep cached sequence fresh for future offline txs
+                        walletManager.updateCachedSequence(sequence)
+                        receivedMessages.append("Balance update: \(walletManager.balance)")
+                        self.isRefreshingBalance = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Mesh-assisted balance refresh
+    func requestBalanceFor(accountId: String) {
+        // Prefer a peer that reported internet
+        let onlinePeers = getOnlinePeers().map { $0.peerID }
+        if onlinePeers.isEmpty { return }
+        isRefreshingBalance = true
+        let message = MeshMessage.balanceRequest(accountId: accountId)
+        sendMessage(message, to: onlinePeers)
+        // Auto-clear loading after 8s in case of no response
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+            guard let self = self else { return }
+            self.isRefreshingBalance = false
         }
     }
 

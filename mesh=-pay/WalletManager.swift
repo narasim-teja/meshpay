@@ -326,6 +326,38 @@ class WalletManager: ObservableObject {
         return try transaction.encodedEnvelope()
     }
 
+    // Public: fetch account details for an arbitrary account id
+    func fetchAccountDetails(accountId: String) async -> AccountResponse? {
+        do {
+            let details = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AccountResponse, Error>) in
+                sdk.accounts.getAccountDetails(accountId: accountId) { response in
+                    switch response {
+                    case .success(let account):
+                        continuation.resume(returning: account)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    @unknown default:
+                        continuation.resume(throwing: NSError(domain: "WalletManager", code: -1))
+                    }
+                }
+            }
+            return details
+        } catch {
+            print("❌ Error fetching account details for \(accountId.prefix(6))...: \(error)")
+            return nil
+        }
+    }
+
+    // Public helpers to manage cached sequence number used for offline txs
+    func updateCachedSequence(_ sequence: Int64) {
+        cachedSequenceNumber = sequence
+        lastAccountFetch = Date()
+    }
+
+    func getCachedSequenceNumber() -> Int64? {
+        cachedSequenceNumber
+    }
+
     // Submit a pre-signed transaction XDR to the network
     func submitSignedTransaction(xdr: String, destination: String, amount: Double) async throws -> String {
         // Submit XDR directly to Horizon
