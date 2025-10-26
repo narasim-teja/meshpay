@@ -110,3 +110,8 @@ Permissions to allow on first run: Bluetooth, Local Network, Camera (for QR scan
   - Offline Mode toggle
   - Restart Discovery button
   - Path summary (Wi‑Fi/Cellular)
+ 
+## Demo
+
+
+## Project Summary
