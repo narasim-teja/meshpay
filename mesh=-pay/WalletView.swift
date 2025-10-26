@@ -12,6 +12,7 @@ struct WalletView: View {
     @State private var showingSendSheet = false
     @State private var showingReceiveSheet = false
     @State private var showingSettings = false
+    @State private var showingMeshNetwork = false
 
     var body: some View {
         ScrollView {
@@ -37,6 +38,35 @@ struct WalletView: View {
                 }
                 .padding(.horizontal)
 
+                // Mesh Network Button
+                Button(action: { showingMeshNetwork = true }) {
+                    HStack {
+                        Image(systemName: "wifi.circle.fill")
+                            .font(.title2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Mesh Network")
+                                .font(.headline)
+                            Text("Connect with nearby devices")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [Color.purple.opacity(0.1), Color.blue.opacity(0.1)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .cornerRadius(12)
+                }
+                .foregroundColor(.primary)
+                .padding(.horizontal)
+
                 // Transaction History
                 TransactionHistoryView()
             }
@@ -60,6 +90,10 @@ struct WalletView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+                .environmentObject(walletManager)
+        }
+        .sheet(isPresented: $showingMeshNetwork) {
+            MeshNetworkView(walletManager: walletManager)
                 .environmentObject(walletManager)
         }
         .task {

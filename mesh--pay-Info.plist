@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app uses the local network to discover and connect with nearby devices for offline payments</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app uses Bluetooth to connect with nearby devices for offline mesh payments</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>This app uses Bluetooth to connect with nearby devices for offline mesh payments</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_stellarmesh._tcp</string>
+		<string>_stellarmesh._udp</string>
+	</array>
+</dict>
+</plist>

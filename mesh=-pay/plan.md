@@ -111,7 +111,7 @@ refund_escrow(escrow_id: u64)
 - Auto-discover nearby devices
 - Route messages through mesh network
 - Handle peer connections/disconnections
-- Grand network visualization (should be fanc)
+- Grand network visualization (should be fancy) -- visually appealing 
 
 **Message Types:**
 ```swift
