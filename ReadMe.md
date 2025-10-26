@@ -114,4 +114,8 @@ Permissions to allow on first run: Bluetooth, Local Network, Camera (for QR scan
 ## Demo
 https://drive.google.com/file/d/1a6iFqncbkXofjnWoCiOD4tLn1dypIbBV/view?usp=sharing
 
-## Project Summary
+If you would like to test the product send us your email so we can send you a test-flight link as it is a mobile app still in beta and not currently publicly available.
+
+## Project Summary Video
+
+https://drive.google.com/file/d/1aE-XOFBTOnBlINOAudVSS0zLiArPbsbK/view?usp=sharing
